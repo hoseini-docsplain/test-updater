@@ -93,6 +93,12 @@ def combine_base_url(base_url: str, file_name: str) -> str:
     return urllib.parse.urljoin(base_url.rstrip("/") + "/", file_name)
 
 
+def with_optional_suffix(base: str, suffix: str | None) -> str:
+    if suffix:
+        return f"{base}-{suffix}"
+    return base
+
+
 def write_latest_json(
     output_path: Path,
     to_version: str,
@@ -126,7 +132,7 @@ def main() -> None:
     parser.add_argument("--root-dir", required=True, help="Release root directory containing full-<version>-<suffix> folders")
     parser.add_argument("--from-version", required=True, help="Old version label (example: 0.0.1)")
     parser.add_argument("--to-version", required=True, help="New version label (example: 0.0.2)")
-    parser.add_argument("--suffix", required=True, help="Folder/file suffix (example: local)")
+    parser.add_argument("--suffix", help="Optional folder/file suffix (example: local)")
     parser.add_argument("--base-url", required=True, help="Base URL used to construct full and patch URLs")
     parser.add_argument(
         "--exclude",
@@ -137,9 +143,13 @@ def main() -> None:
     args = parser.parse_args()
 
     root_dir = Path(args.root_dir).resolve()
-    old_root = root_dir / f"full-{args.from_version}-{args.suffix}"
-    new_root = root_dir / f"full-{args.to_version}-{args.suffix}"
-    output = root_dir / f"patch-{args.from_version}-to-{args.to_version}-{args.suffix}.zip"
+    old_root = root_dir / with_optional_suffix(f"full-{args.from_version}", args.suffix)
+    new_root = root_dir / with_optional_suffix(f"full-{args.to_version}", args.suffix)
+    output_name = with_optional_suffix(
+        f"patch-{args.from_version}-to-{args.to_version}",
+        args.suffix,
+    )
+    output = root_dir / f"{output_name}.zip"
     latest_output = root_dir / "latest.json"
 
     if not old_root.is_dir():

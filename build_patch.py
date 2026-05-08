@@ -3,6 +3,7 @@ import datetime as dt
 import hashlib
 import json
 import time
+import urllib.parse
 import zipfile
 from pathlib import Path
 
@@ -80,14 +81,53 @@ def build_patch(
     }
 
 
+def build_zip_from_root(root: Path, zip_output: Path) -> None:
+    zip_output.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_output, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for path in sorted(p for p in root.rglob("*") if p.is_file()):
+            rel = path.relative_to(root).as_posix()
+            zf.write(path, arcname=rel)
+
+
+def combine_base_url(base_url: str, file_name: str) -> str:
+    return urllib.parse.urljoin(base_url.rstrip("/") + "/", file_name)
+
+
+def write_latest_json(
+    output_path: Path,
+    to_version: str,
+    from_version: str,
+    base_url: str,
+    full_zip_name: str,
+    full_sha256: str,
+    patch_zip_name: str,
+    patch_sha256: str,
+) -> None:
+    latest_payload = {
+        "version": to_version,
+        "full": {
+            "url": combine_base_url(base_url, full_zip_name),
+            "sha256": full_sha256,
+        },
+        "patches": {
+            from_version: {
+                "url": combine_base_url(base_url, patch_zip_name),
+                "sha256": patch_sha256,
+            }
+        },
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(latest_payload, indent=2), encoding="utf-8")
+
+
 def main() -> None:
     start_time = time.perf_counter()
-    parser = argparse.ArgumentParser(description="Build a patch zip between two app build folders.")
-    parser.add_argument("--old-root", required=True, help="Old build root (example: releases/0.0.1/bundle)")
-    parser.add_argument("--new-root", required=True, help="New build root (example: releases/0.0.2/bundle)")
+    parser = argparse.ArgumentParser(description="Build full/patch packages and latest.json from release folders.")
+    parser.add_argument("--root-dir", required=True, help="Release root directory containing full-<version>-<suffix> folders")
     parser.add_argument("--from-version", required=True, help="Old version label (example: 0.0.1)")
     parser.add_argument("--to-version", required=True, help="New version label (example: 0.0.2)")
-    parser.add_argument("--output", default="patch.zip", help="Patch zip output path")
+    parser.add_argument("--suffix", required=True, help="Folder/file suffix (example: local)")
+    parser.add_argument("--base-url", required=True, help="Base URL used to construct full and patch URLs")
     parser.add_argument(
         "--exclude",
         action="append",
@@ -96,14 +136,21 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    old_root = Path(args.old_root).resolve()
-    new_root = Path(args.new_root).resolve()
-    output = Path(args.output).resolve()
+    root_dir = Path(args.root_dir).resolve()
+    old_root = root_dir / f"full-{args.from_version}-{args.suffix}"
+    new_root = root_dir / f"full-{args.to_version}-{args.suffix}"
+    output = root_dir / f"patch-{args.from_version}-to-{args.to_version}-{args.suffix}.zip"
+    latest_output = root_dir / "latest.json"
 
     if not old_root.is_dir():
         raise SystemExit(f"Old root does not exist or is not a directory: {old_root}")
     if not new_root.is_dir():
         raise SystemExit(f"New root does not exist or is not a directory: {new_root}")
+
+    # Build the full package zip first from new-root.
+    full_zip_output = output.parent / f"{new_root.name}.zip"
+    build_zip_from_root(new_root, full_zip_output)
+    full_zip_sha256 = sha256_file(full_zip_output)
 
     excludes = {x.replace("\\", "/") for x in args.exclude}
     result = build_patch(
@@ -119,6 +166,20 @@ def main() -> None:
     print(f"Changed/new files: {result['changed_files']}")
     print(f"Deleted files: {result['deleted_files']}")
     print(f"SHA256: {result['sha256']}")
+    print(f"Full zip written: {full_zip_output}")
+    print(f"Full zip SHA256: {full_zip_sha256}")
+    write_latest_json(
+        output_path=latest_output,
+        to_version=args.to_version,
+        from_version=args.from_version,
+        base_url=args.base_url,
+        full_zip_name=full_zip_output.name,
+        full_sha256=full_zip_sha256,
+        patch_zip_name=output.name,
+        patch_sha256=result["sha256"],
+    )
+    print(f"latest.json written: {latest_output}")
+
     print(f"Execution time: {time.perf_counter() - start_time:.3f} seconds")
 
 

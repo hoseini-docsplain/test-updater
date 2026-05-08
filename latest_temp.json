@@ -1,0 +1,13 @@
+{
+  "version": "VERSION_STRING",
+  "full": {
+    "url": "FULL_BUNDLE_ZIP_URL",
+    "sha256": "FULL_BUNDLE_ZIP_SHA256"
+  },
+  "patches": {
+    "OLD_VERSION_STRING": {
+      "url": "PATCH_ZIP_URL",
+      "sha256": "PATCH_ZIP_SHA256"
+    }
+  }
+}

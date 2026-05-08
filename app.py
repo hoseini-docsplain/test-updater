@@ -1,3 +1,4 @@
+import argparse
 import os
 import re
 import subprocess
@@ -9,12 +10,11 @@ from tkinter import messagebox
 import customtkinter as ctk
 import requests
 
+from updater import UpdaterApp
 from version import APP_VERSION
 
 
 APP_EXE_NAME = "app.exe"
-UPDATER_EXE_NAME = "updater.exe"
-UPDATER_SCRIPT_NAME = "updater.py"
 UPDATE_FEED_URL = os.environ.get(
     "APP_UPDATE_FEED_URL",
     "https://raw.githubusercontent.com/hoseini-docsplain/patch-updater/main/latest.json",
@@ -69,10 +69,11 @@ def is_update_available(feed: dict, current_version: str) -> bool:
 
 def updater_command(current_version: str) -> list[str]:
     root = app_root()
-    updater_exe = root / UPDATER_EXE_NAME
-    if getattr(sys, "frozen", False) and updater_exe.exists():
+    if getattr(sys, "frozen", False):
         return [
-            str(updater_exe),
+            str(sys.executable),
+            "--mode",
+            "updater",
             "--install-root",
             str(root),
             "--current-version",
@@ -85,7 +86,9 @@ def updater_command(current_version: str) -> list[str]:
 
     return [
         sys.executable,
-        str(root / UPDATER_SCRIPT_NAME),
+        str(root / "app.py"),
+        "--mode",
+        "updater",
         "--install-root",
         str(root),
         "--current-version",
@@ -167,6 +170,34 @@ class MainApp(ctk.CTk):
         self.destroy()
 
 
-if __name__ == "__main__":
-    app = MainApp()
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Desktop app with built-in updater mode.")
+    parser.add_argument("--mode", choices=["app", "updater"], default="app")
+    parser.add_argument("--install-root")
+    parser.add_argument("--current-version")
+    parser.add_argument("--feed-url")
+    parser.add_argument("--restart-exe", default=APP_EXE_NAME)
+    return parser.parse_args()
+
+
+def run_updater_mode(args: argparse.Namespace) -> None:
+    install_root = Path(args.install_root) if args.install_root else app_root()
+    current_version = args.current_version or read_current_version()
+    feed_url = args.feed_url or UPDATE_FEED_URL
+
+    app = UpdaterApp(
+        install_root=install_root,
+        current_version=current_version,
+        feed_url=feed_url,
+        restart_exe=args.restart_exe,
+    )
     app.mainloop()
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    if args.mode == "updater":
+        run_updater_mode(args)
+    else:
+        app = MainApp()
+        app.mainloop()

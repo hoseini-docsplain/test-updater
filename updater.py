@@ -64,6 +64,10 @@ def ensure_patch_does_not_update_protected_files(rel_paths: list[str]) -> None:
         )
 
 
+def is_protected_file(rel_path: str) -> bool:
+    return rel_path in PROTECTED_FILES
+
+
 def safe_extract(zip_path: Path, destination: Path) -> None:
     with zipfile.ZipFile(zip_path, "r") as zf:
         for info in zf.infolist():
@@ -188,6 +192,316 @@ def apply_patch(
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
+def find_full_bundle_root(extract_dir: Path) -> Path:
+    if (extract_dir / "app.exe").exists() or (extract_dir / "_internal").is_dir():
+        return extract_dir
+
+    candidates = [
+        path
+        for path in extract_dir.iterdir()
+        if path.is_dir() and ((path / "app.exe").exists() or (path / "_internal").is_dir())
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+
+    raise RuntimeError("Full update zip must contain app.exe and _internal at its root.")
+
+
+def collect_full_bundle_files(bundle_root: Path) -> list[str]:
+    rel_paths = []
+    for path in bundle_root.rglob("*"):
+        if path.is_file():
+            rel_paths.append(normalize_rel_path(path.relative_to(bundle_root).as_posix()))
+    return sorted(rel_paths)
+
+
+def collect_managed_install_files(install_root: Path) -> list[str]:
+    rel_paths = []
+    app_exe = install_root / "app.exe"
+    if app_exe.is_file():
+        rel_paths.append("app.exe")
+
+    internal_root = install_root / "_internal"
+    if internal_root.is_dir():
+        for path in internal_root.rglob("*"):
+            if path.is_file():
+                rel_paths.append(normalize_rel_path(path.relative_to(install_root).as_posix()))
+
+    return sorted(rel_paths)
+
+
+def write_deferred_apply_script(
+    work_dir: Path,
+    install_root: Path,
+    source_root: Path,
+    copy_rel_paths: list[str],
+    delete_rel_paths: list[str],
+    restart_exe: str,
+) -> Path:
+    plan_path = work_dir / "apply_plan.json"
+    script_path = work_dir / "apply_update.ps1"
+    backup_dir = work_dir / "backup"
+    log_path = work_dir / "apply_update.log"
+
+    plan = {
+        "pid": os.getpid(),
+        "install_root": str(install_root),
+        "source_root": str(source_root),
+        "backup_root": str(backup_dir),
+        "restart_path": str(install_root / restart_exe),
+        "copy_files": copy_rel_paths,
+        "delete_files": delete_rel_paths,
+        "work_dir": str(work_dir),
+        "log_path": str(log_path),
+    }
+    plan_path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
+
+    script_path.write_text(
+        r'''
+$ErrorActionPreference = "Stop"
+$plan = Get-Content -LiteralPath $args[0] -Raw | ConvertFrom-Json
+
+function Write-UpdateLog($message) {
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Add-Content -LiteralPath $plan.log_path -Value "[$timestamp] $message"
+}
+
+function Join-RelativePath($root, $relative) {
+    $parts = $relative -split "/"
+    return Join-Path -Path $root -ChildPath ([System.IO.Path]::Combine($parts))
+}
+
+try {
+    Write-UpdateLog "Waiting for updater process $($plan.pid) to exit."
+    Wait-Process -Id $plan.pid -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+
+    New-Item -ItemType Directory -Path $plan.backup_root -Force | Out-Null
+
+    foreach ($relative in $plan.copy_files) {
+        $target = Join-RelativePath $plan.install_root $relative
+        if (Test-Path -LiteralPath $target -PathType Leaf) {
+            $backup = Join-RelativePath $plan.backup_root $relative
+            New-Item -ItemType Directory -Path (Split-Path -Parent $backup) -Force | Out-Null
+            Copy-Item -LiteralPath $target -Destination $backup -Force
+        }
+    }
+
+    foreach ($relative in $plan.delete_files) {
+        $target = Join-RelativePath $plan.install_root $relative
+        if (Test-Path -LiteralPath $target -PathType Leaf) {
+            $backup = Join-RelativePath $plan.backup_root $relative
+            New-Item -ItemType Directory -Path (Split-Path -Parent $backup) -Force | Out-Null
+            Copy-Item -LiteralPath $target -Destination $backup -Force
+            Remove-Item -LiteralPath $target -Force
+        }
+    }
+
+    foreach ($relative in $plan.copy_files) {
+        $source = Join-RelativePath $plan.source_root $relative
+        $target = Join-RelativePath $plan.install_root $relative
+        New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+        Copy-Item -LiteralPath $source -Destination $target -Force
+    }
+
+    Write-UpdateLog "Update applied successfully."
+    if (Test-Path -LiteralPath $plan.restart_path -PathType Leaf) {
+        Start-Process -FilePath $plan.restart_path -WorkingDirectory $plan.install_root
+    }
+}
+catch {
+    Write-UpdateLog "Update failed: $($_.Exception.Message)"
+    try {
+        foreach ($relative in $plan.copy_files) {
+            $backup = Join-RelativePath $plan.backup_root $relative
+            if (Test-Path -LiteralPath $backup -PathType Leaf) {
+                $target = Join-RelativePath $plan.install_root $relative
+                New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+                Copy-Item -LiteralPath $backup -Destination $target -Force
+            }
+        }
+        foreach ($relative in $plan.delete_files) {
+            $backup = Join-RelativePath $plan.backup_root $relative
+            if (Test-Path -LiteralPath $backup -PathType Leaf) {
+                $target = Join-RelativePath $plan.install_root $relative
+                New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+                Copy-Item -LiteralPath $backup -Destination $target -Force
+            }
+        }
+    }
+    catch {
+        Write-UpdateLog "Rollback failed: $($_.Exception.Message)"
+    }
+}
+'''.strip(),
+        encoding="utf-8",
+    )
+    return script_path
+
+
+def launch_deferred_apply(script_path: Path, plan_path: Path) -> None:
+    subprocess.Popen(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script_path),
+            str(plan_path),
+        ],
+        cwd=str(script_path.parent),
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
+
+
+def stage_patch_update(install_root: Path, patch_zip_path: Path, restart_exe: str) -> Path:
+    install_root = install_root.resolve()
+    work_dir = install_root / f".pending_patch_{uuid4().hex}"
+    extract_dir = work_dir / "extract"
+    extract_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_extract(patch_zip_path, extract_dir)
+
+    deleted_file_list = []
+    deleted_path = extract_dir / "deleted_files.txt"
+    if deleted_path.exists():
+        deleted_file_list = [
+            normalize_rel_path(line)
+            for line in deleted_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    changed_rel_paths = []
+    for path in extract_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = normalize_rel_path(path.relative_to(extract_dir).as_posix())
+        if rel in CONTROL_FILES:
+            continue
+        changed_rel_paths.append(rel)
+
+    changed_rel_paths.sort()
+    ensure_patch_does_not_update_protected_files(changed_rel_paths)
+    ensure_patch_does_not_update_protected_files(deleted_file_list)
+
+    return write_deferred_apply_script(
+        work_dir=work_dir,
+        install_root=install_root,
+        source_root=extract_dir,
+        copy_rel_paths=changed_rel_paths,
+        delete_rel_paths=deleted_file_list,
+        restart_exe=restart_exe,
+    )
+
+
+def stage_full_update(install_root: Path, full_zip_path: Path, restart_exe: str) -> Path:
+    install_root = install_root.resolve()
+    work_dir = install_root / f".pending_full_update_{uuid4().hex}"
+    extract_dir = work_dir / "extract"
+    extract_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_extract(full_zip_path, extract_dir)
+    bundle_root = find_full_bundle_root(extract_dir)
+    copy_rel_paths = collect_full_bundle_files(bundle_root)
+    source_set = set(copy_rel_paths)
+    delete_rel_paths = [
+        rel
+        for rel in collect_managed_install_files(install_root)
+        if rel not in source_set
+    ]
+
+    return write_deferred_apply_script(
+        work_dir=work_dir,
+        install_root=install_root,
+        source_root=bundle_root,
+        copy_rel_paths=copy_rel_paths,
+        delete_rel_paths=delete_rel_paths,
+        restart_exe=restart_exe,
+    )
+
+
+def apply_full_update(install_root: Path, full_zip_path: Path) -> None:
+    install_root = install_root.resolve()
+    full_zip_path = full_zip_path.resolve()
+
+    if not install_root.is_dir():
+        raise RuntimeError(f"Install root does not exist: {install_root}")
+    if not full_zip_path.is_file():
+        raise RuntimeError(f"Full update file does not exist: {full_zip_path}")
+
+    work_dir = install_root / f".app_full_update_{uuid4().hex}"
+    extract_dir = work_dir / "extract"
+    backup_dir = work_dir / "backup"
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    backup_dir.mkdir(parents=True, exist_ok=True)
+
+    created_paths: list[Path] = []
+    backup_paths: list[str] = []
+
+    try:
+        safe_extract(full_zip_path, extract_dir)
+        bundle_root = find_full_bundle_root(extract_dir)
+        source_rel_paths = collect_full_bundle_files(bundle_root)
+        copied_rel_paths = [rel for rel in source_rel_paths if not is_protected_file(rel)]
+        source_set = set(copied_rel_paths)
+        delete_rel_paths = [
+            rel
+            for rel in collect_managed_install_files(install_root)
+            if rel not in source_set and not is_protected_file(rel)
+        ]
+
+        def backup_if_exists(rel: str) -> None:
+            target = install_root / rel
+            if target.exists() and target.is_file() and rel not in backup_paths:
+                dest = backup_dir / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(target, dest)
+                backup_paths.append(rel)
+
+        for rel in copied_rel_paths:
+            source = bundle_root / rel
+            target = install_root / rel
+            if not is_safe_path(install_root, target):
+                raise RuntimeError(f"Unsafe target path in full update: {rel}")
+
+            backup_if_exists(rel)
+            if not target.exists():
+                created_paths.append(target)
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+
+        for rel in delete_rel_paths:
+            target = install_root / rel
+            if not is_safe_path(install_root, target):
+                raise RuntimeError(f"Unsafe delete target in full update: {rel}")
+
+            if target.exists() and target.is_file():
+                backup_if_exists(rel)
+                target.unlink()
+
+        for rel in copied_rel_paths:
+            source = bundle_root / rel
+            target = install_root / rel
+            if not target.exists() or sha256_file(source) != sha256_file(target):
+                raise RuntimeError(f"Hash mismatch after full update apply: {rel}")
+
+    except Exception:
+        for path in created_paths:
+            if path.exists() and path.is_file():
+                path.unlink()
+
+        for rel in backup_paths:
+            backup_file = backup_dir / rel
+            target = install_root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(backup_file, target)
+        raise
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
 def fetch_update_feed(feed_url: str) -> dict:
     if requests is None:
         raise RuntimeError("requests is required to fetch update metadata.")
@@ -197,7 +511,7 @@ def fetch_update_feed(feed_url: str) -> dict:
     return response.json()
 
 
-def get_patch_for_version(feed: dict, current_version: str) -> dict:
+def get_patch_for_version(feed: dict, current_version: str) -> dict | None:
     patches = feed.get("patches", {})
     if isinstance(patches, dict):
         patch = patches.get(current_version)
@@ -209,7 +523,12 @@ def get_patch_for_version(feed: dict, current_version: str) -> dict:
             if isinstance(patch, dict) and patch.get("from_version") == current_version:
                 return patch
 
-    raise RuntimeError(f"No patch is available from version {current_version}.")
+    return None
+
+
+def get_full_update(feed: dict) -> dict | None:
+    full = feed.get("full")
+    return full if isinstance(full, dict) and full.get("url") else None
 
 
 def download_file(url: str, output_path: Path, expected_sha256: str | None, progress_callback) -> None:
@@ -303,25 +622,35 @@ class UpdaterApp(ctk.CTk if ctk else object):
             feed = fetch_update_feed(self.feed_url)
             latest_version = str(feed.get("version", "unknown"))
             patch = get_patch_for_version(feed, self.current_version)
+            full = get_full_update(feed)
 
-            patch_url = patch.get("url")
-            if not patch_url:
-                raise RuntimeError("Patch metadata does not include a URL.")
+            update_package = patch or full
+            update_kind = "patch" if patch else "full update"
+            if not update_package:
+                raise RuntimeError(f"No patch or full update is available from version {self.current_version}.")
 
-            patch_hash = patch.get("sha256")
-            patch_path = self.install_root / f".downloaded_patch_{uuid4().hex}.zip"
+            package_url = update_package.get("url")
+            if not package_url:
+                raise RuntimeError("Update metadata does not include a URL.")
 
-            self.set_status(f"Downloading update {self.current_version} to {latest_version}...")
-            download_file(patch_url, patch_path, patch_hash, self.set_download_progress)
+            package_hash = update_package.get("sha256")
+            package_path = self.install_root / f".downloaded_update_{uuid4().hex}.zip"
 
-            self.set_status("Applying update...")
+            self.set_status(f"Downloading {update_kind} {self.current_version} to {latest_version}...")
+            download_file(package_url, package_path, package_hash, self.set_download_progress)
+
+            self.set_status(f"Preparing {update_kind}...")
             self.after(0, lambda: self.progress.configure(mode="indeterminate"))
             self.after(0, self.progress.start)
-            apply_patch(self.install_root, patch_path)
-            patch_path.unlink(missing_ok=True)
+            if patch:
+                script_path = stage_patch_update(self.install_root, package_path, self.restart_exe)
+            else:
+                script_path = stage_full_update(self.install_root, package_path, self.restart_exe)
+            package_path.unlink(missing_ok=True)
 
-            self.set_status(f"Update completed successfully.\nVersion: {latest_version}")
-            self.after(0, self.finish_success)
+            self.set_status(f"Finishing update to {latest_version}...")
+            launch_deferred_apply(script_path, script_path.parent / "apply_plan.json")
+            self.after(500, self.destroy)
         except Exception as exc:
             self.failed = True
             self.set_status(

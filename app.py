@@ -57,6 +57,11 @@ def get_patch_for_version(feed: dict, current_version: str) -> dict | None:
     return None
 
 
+def get_full_update(feed: dict) -> dict | None:
+    full = feed.get("full")
+    return full if isinstance(full, dict) and full.get("url") else None
+
+
 def is_update_available(feed: dict, current_version: str) -> bool:
     latest_version = str(feed.get("version", "0.0.0"))
     return version_key(latest_version) > version_key(current_version)
@@ -127,11 +132,12 @@ class MainApp(ctk.CTk):
                 return
 
             patch = get_patch_for_version(feed, self.current_version)
-            if not patch or not patch.get("url"):
+            full = get_full_update(feed)
+            if not patch and not full:
                 self.after(
                     0,
                     lambda: self.update_label.configure(
-                        text="Update available, but no patch for this version."
+                        text="Update available, but no package for this version."
                     ),
                 )
                 return

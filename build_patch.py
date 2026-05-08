@@ -2,6 +2,7 @@
 import datetime as dt
 import hashlib
 import json
+import time
 import zipfile
 from pathlib import Path
 
@@ -74,6 +75,7 @@ def build_patch(
 
 
 def main() -> None:
+    start_time = time.perf_counter()
     parser = argparse.ArgumentParser(description="Build a patch zip between two app build folders.")
     parser.add_argument("--old-root", required=True, help="Old build root (example: releases/0.0.1/bundle)")
     parser.add_argument("--new-root", required=True, help="New build root (example: releases/0.0.2/bundle)")
@@ -111,6 +113,7 @@ def main() -> None:
     print(f"Changed/new files: {result['changed_files']}")
     print(f"Deleted files: {result['deleted_files']}")
     print(f"SHA256: {result['sha256']}")
+    print(f"Execution time: {time.perf_counter() - start_time:.3f} seconds")
 
 
 if __name__ == "__main__":

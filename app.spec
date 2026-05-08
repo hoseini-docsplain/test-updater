@@ -40,9 +40,9 @@ exe_app = EXE(
     entitlements_file=None,
 )
 
-# ---- updater.py ----
+# ---- patch_updater.py ----
 a_updater = Analysis(
-    ['updater.py'],
+    ['patch_updater.py'],
     pathex=[],
     binaries=[],
     datas=customtkinter_datas,
@@ -62,7 +62,7 @@ exe_updater = EXE(
     a_updater.scripts,
     [],
     exclude_binaries=True,
-    name='updater',
+    name='patch_updater',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

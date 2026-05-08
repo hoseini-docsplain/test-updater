@@ -7,6 +7,12 @@ import zipfile
 from pathlib import Path
 
 
+DEFAULT_EXCLUDES = {
+    "manifest.json",
+    "updater.exe",
+}
+
+
 def sha256_file(path: Path) -> str:
     hasher = hashlib.sha256()
     with path.open("rb") as f:
@@ -85,7 +91,7 @@ def main() -> None:
     parser.add_argument(
         "--exclude",
         action="append",
-        default=["manifest.json"],
+        default=sorted(DEFAULT_EXCLUDES),
         help="Relative path to exclude from compare/patch. Can be passed multiple times.",
     )
     args = parser.parse_args()

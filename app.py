@@ -13,8 +13,8 @@ from version import APP_VERSION
 
 
 APP_EXE_NAME = "app.exe"
-PATCH_UPDATER_EXE_NAME = "patch_updater.exe"
-PATCH_UPDATER_SCRIPT_NAME = "patch_updater.py"
+UPDATER_EXE_NAME = "updater.exe"
+UPDATER_SCRIPT_NAME = "updater.py"
 UPDATE_FEED_URL = os.environ.get(
     "APP_UPDATE_FEED_URL",
     "https://raw.githubusercontent.com/hoseini-docsplain/patch-updater/main/latest.json",
@@ -64,7 +64,7 @@ def is_update_available(feed: dict, current_version: str) -> bool:
 
 def updater_command(current_version: str) -> list[str]:
     root = app_root()
-    updater_exe = root / PATCH_UPDATER_EXE_NAME
+    updater_exe = root / UPDATER_EXE_NAME
     if getattr(sys, "frozen", False) and updater_exe.exists():
         return [
             str(updater_exe),
@@ -80,7 +80,7 @@ def updater_command(current_version: str) -> list[str]:
 
     return [
         sys.executable,
-        str(root / PATCH_UPDATER_SCRIPT_NAME),
+        str(root / UPDATER_SCRIPT_NAME),
         "--install-root",
         str(root),
         "--current-version",

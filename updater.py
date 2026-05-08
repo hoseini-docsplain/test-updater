@@ -22,6 +22,7 @@ except ImportError:
 
 
 CONTROL_FILES = {"patch_meta.json", "deleted_files.txt"}
+PROTECTED_FILES = {"updater.exe"}
 REQUEST_TIMEOUT = 15
 CHUNK_SIZE = 1024 * 1024
 
@@ -53,6 +54,16 @@ def allowed_delete(rel_path: str, delete_prefixes: tuple[str, ...]) -> bool:
     return any(rel_path == prefix or rel_path.startswith(prefix + "/") for prefix in delete_prefixes)
 
 
+def ensure_patch_does_not_update_protected_files(rel_paths: list[str]) -> None:
+    protected = sorted(rel for rel in rel_paths if rel in PROTECTED_FILES)
+    if protected:
+        joined = ", ".join(protected)
+        raise RuntimeError(
+            f"Patch includes updater executable(s): {joined}. "
+            "Rebuild the patch excluding updater executables."
+        )
+
+
 def safe_extract(zip_path: Path, destination: Path) -> None:
     with zipfile.ZipFile(zip_path, "r") as zf:
         for info in zf.infolist():
@@ -71,7 +82,7 @@ def safe_extract(zip_path: Path, destination: Path) -> None:
 def apply_patch(
     install_root: Path,
     patch_zip_path: Path,
-    delete_prefixes: tuple[str, ...] = ("app.exe", "patch_updater.exe", "updater.exe", "_internal"),
+    delete_prefixes: tuple[str, ...] = ("app.exe", "updater.exe", "_internal"),
 ) -> None:
     install_root = install_root.resolve()
     patch_zip_path = patch_zip_path.resolve()
@@ -115,6 +126,8 @@ def apply_patch(
             changed_rel_paths.append(rel)
 
         changed_rel_paths.sort()
+        ensure_patch_does_not_update_protected_files(changed_rel_paths)
+        ensure_patch_does_not_update_protected_files(deleted_file_list)
 
         def backup_if_exists(rel: str) -> None:
             target = install_root / rel
@@ -225,7 +238,7 @@ def download_file(url: str, output_path: Path, expected_sha256: str | None, prog
         raise RuntimeError("Downloaded patch failed SHA256 verification.")
 
 
-class PatchUpdaterApp(ctk.CTk if ctk else object):
+class UpdaterApp(ctk.CTk if ctk else object):
     def __init__(
         self,
         install_root: Path,
@@ -355,7 +368,7 @@ if __name__ == "__main__":
 
     args = parse_args()
     os.chdir(args.install_root)
-    app = PatchUpdaterApp(
+    app = UpdaterApp(
         install_root=Path(args.install_root),
         current_version=args.current_version,
         feed_url=args.feed_url,

@@ -1,7 +1,5 @@
-import argparse
 import os
 import re
-import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -67,43 +65,11 @@ def is_update_available(feed: dict, current_version: str) -> bool:
     return version_key(latest_version) > version_key(current_version)
 
 
-def updater_command(current_version: str) -> list[str]:
-    root = app_root()
-    if getattr(sys, "frozen", False):
-        return [
-            str(sys.executable),
-            "--mode",
-            "updater",
-            "--install-root",
-            str(root),
-            "--current-version",
-            current_version,
-            "--feed-url",
-            UPDATE_FEED_URL,
-            "--restart-exe",
-            APP_EXE_NAME,
-        ]
-
-    return [
-        sys.executable,
-        str(root / "app.py"),
-        "--mode",
-        "updater",
-        "--install-root",
-        str(root),
-        "--current-version",
-        current_version,
-        "--feed-url",
-        UPDATE_FEED_URL,
-        "--restart-exe",
-        APP_EXE_NAME,
-    ]
-
-
 class MainApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.current_version = read_current_version()
+        self.run_updater_after_close = False
 
         self.title("Simple App")
         self.geometry("440x300")
@@ -161,43 +127,22 @@ class MainApp(ctk.CTk):
             self.launch_updater_and_exit()
 
     def launch_updater_and_exit(self) -> None:
-        try:
-            subprocess.Popen(updater_command(self.current_version), cwd=str(app_root()))
-        except OSError as exc:
-            messagebox.showerror("Update failed", f"Could not start updater:\n{exc}", parent=self)
-            return
-
+        self.run_updater_after_close = True
         self.destroy()
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Desktop app with built-in updater mode.")
-    parser.add_argument("--mode", choices=["app", "updater"], default="app")
-    parser.add_argument("--install-root")
-    parser.add_argument("--current-version")
-    parser.add_argument("--feed-url")
-    parser.add_argument("--restart-exe", default=APP_EXE_NAME)
-    return parser.parse_args()
-
-
-def run_updater_mode(args: argparse.Namespace) -> None:
-    install_root = Path(args.install_root) if args.install_root else app_root()
-    current_version = args.current_version or read_current_version()
-    feed_url = args.feed_url or UPDATE_FEED_URL
-
+def run_updater_window(current_version: str) -> None:
     app = UpdaterApp(
-        install_root=install_root,
+        install_root=app_root(),
         current_version=current_version,
-        feed_url=feed_url,
-        restart_exe=args.restart_exe,
+        feed_url=UPDATE_FEED_URL,
+        restart_exe=APP_EXE_NAME,
     )
     app.mainloop()
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    if args.mode == "updater":
-        run_updater_mode(args)
-    else:
-        app = MainApp()
-        app.mainloop()
+    app = MainApp()
+    app.mainloop()
+    if app.run_updater_after_close:
+        run_updater_window(app.current_version)

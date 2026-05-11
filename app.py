@@ -17,7 +17,8 @@ UPDATE_FEED_URL = os.environ.get(
     "APP_UPDATE_FEED_URL",
     "https://raw.githubusercontent.com/hoseini-docsplain/patch-updater/main/latest.json",
 )
-REQUEST_TIMEOUT = 8
+REQUEST_TIMEOUT = 15
+UPDATE_STATUS_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
 
 
 def app_root() -> Path:
@@ -70,6 +71,7 @@ class MainApp(ctk.CTk):
         super().__init__()
         self.current_version = read_current_version()
         self.run_updater_after_close = False
+        self.is_status_check_running = False
 
         self.title("Simple App")
         self.geometry("440x300")
@@ -89,9 +91,16 @@ class MainApp(ctk.CTk):
         self.update_label.pack(pady=(0, 12))
 
         self.after(500, self.check_for_updates_async)
+        self.after(UPDATE_STATUS_CHECK_INTERVAL_MS, self.check_update_status_async)
 
     def check_for_updates_async(self) -> None:
         threading.Thread(target=self.check_for_updates, daemon=True).start()
+
+    def check_update_status_async(self) -> None:
+        if not self.is_status_check_running:
+            self.is_status_check_running = True
+            threading.Thread(target=self.check_update_status, daemon=True).start()
+        self.after(UPDATE_STATUS_CHECK_INTERVAL_MS, self.check_update_status_async)
 
     def check_for_updates(self) -> None:
         try:
@@ -115,6 +124,23 @@ class MainApp(ctk.CTk):
             self.after(0, lambda: self.prompt_update(latest_version))
         except Exception:
             self.after(0, lambda: self.update_label.configure(text="Update check unavailable."))
+
+    def check_update_status(self) -> None:
+        try:
+            feed = fetch_update_feed()
+            if not is_update_available(feed, self.current_version):
+                self.after(0, lambda: self.update_label.configure(text="App is up to date."))
+                return
+
+            latest_version = str(feed.get("version", "unknown"))
+            self.after(
+                0,
+                lambda: self.update_label.configure(text=f"Update available: {latest_version}"),
+            )
+        except Exception:
+            self.after(0, lambda: self.update_label.configure(text="Update check unavailable."))
+        finally:
+            self.is_status_check_running = False
 
     def prompt_update(self, latest_version: str) -> None:
         self.update_label.configure(text=f"Update available: {latest_version}")

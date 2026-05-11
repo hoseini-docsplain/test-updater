@@ -64,10 +64,6 @@ def ensure_patch_does_not_update_protected_files(rel_paths: list[str]) -> None:
         )
 
 
-def is_protected_file(rel_path: str) -> bool:
-    return rel_path in PROTECTED_FILES
-
-
 def safe_extract(zip_path: Path, destination: Path) -> None:
     with zipfile.ZipFile(zip_path, "r") as zf:
         for info in zf.infolist():
@@ -81,115 +77,6 @@ def safe_extract(zip_path: Path, destination: Path) -> None:
             target.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(info, "r") as source, target.open("wb") as dest:
                 shutil.copyfileobj(source, dest)
-
-
-def apply_patch(
-    install_root: Path,
-    patch_zip_path: Path,
-    delete_prefixes: tuple[str, ...] = ("app.exe", "updater.exe", "_internal"),
-) -> None:
-    install_root = install_root.resolve()
-    patch_zip_path = patch_zip_path.resolve()
-
-    if not install_root.is_dir():
-        raise RuntimeError(f"Install root does not exist: {install_root}")
-    if not patch_zip_path.is_file():
-        raise RuntimeError(f"Patch file does not exist: {patch_zip_path}")
-
-    work_dir = install_root / f".app_patch_{uuid4().hex}"
-    extract_dir = work_dir / "extract"
-    backup_dir = work_dir / "backup"
-    extract_dir.mkdir(parents=True, exist_ok=True)
-    backup_dir.mkdir(parents=True, exist_ok=True)
-
-    created_paths: list[Path] = []
-    backup_paths: list[str] = []
-
-    try:
-        safe_extract(patch_zip_path, extract_dir)
-
-        meta_path = extract_dir / "patch_meta.json"
-        patch_meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
-
-        deleted_file_list = []
-        deleted_path = extract_dir / "deleted_files.txt"
-        if deleted_path.exists():
-            deleted_file_list = [
-                normalize_rel_path(line)
-                for line in deleted_path.read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            ]
-
-        changed_rel_paths = []
-        for path in extract_dir.rglob("*"):
-            if not path.is_file():
-                continue
-            rel = normalize_rel_path(path.relative_to(extract_dir).as_posix())
-            if rel in CONTROL_FILES:
-                continue
-            changed_rel_paths.append(rel)
-
-        changed_rel_paths.sort()
-        ensure_patch_does_not_update_protected_files(changed_rel_paths)
-        ensure_patch_does_not_update_protected_files(deleted_file_list)
-
-        def backup_if_exists(rel: str) -> None:
-            target = install_root / rel
-            if target.exists() and target.is_file() and rel not in backup_paths:
-                dest = backup_dir / rel
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(target, dest)
-                backup_paths.append(rel)
-
-        for rel in changed_rel_paths:
-            target = install_root / rel
-            source = extract_dir / rel
-            if not is_safe_path(install_root, target):
-                raise RuntimeError(f"Unsafe target path in patch: {rel}")
-
-            backup_if_exists(rel)
-            if not target.exists():
-                created_paths.append(target)
-
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
-
-        for rel in deleted_file_list:
-            if not allowed_delete(rel, delete_prefixes):
-                continue
-
-            target = install_root / rel
-            if not is_safe_path(install_root, target):
-                raise RuntimeError(f"Unsafe delete target in patch: {rel}")
-
-            if target.exists() and target.is_file():
-                backup_if_exists(rel)
-                target.unlink()
-
-        expected = patch_meta.get("changed_files", {})
-        for rel, meta in expected.items():
-            normalized_rel = normalize_rel_path(rel)
-            target = install_root / normalized_rel
-            if not target.exists() or not target.is_file():
-                raise RuntimeError(f"Patched file missing after apply: {normalized_rel}")
-
-            expected_hash = meta.get("sha256")
-            if expected_hash and sha256_file(target) != expected_hash:
-                raise RuntimeError(f"Hash mismatch after patch apply: {normalized_rel}")
-
-    except Exception:
-        for path in created_paths:
-            if path.exists() and path.is_file():
-                path.unlink()
-
-        for rel in backup_paths:
-            backup_file = backup_dir / rel
-            target = install_root / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(backup_file, target)
-        raise
-    finally:
-        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def find_full_bundle_root(extract_dir: Path) -> Path:
@@ -421,87 +308,6 @@ def stage_full_update(install_root: Path, full_zip_path: Path, restart_exe: str)
     )
 
 
-def apply_full_update(install_root: Path, full_zip_path: Path) -> None:
-    install_root = install_root.resolve()
-    full_zip_path = full_zip_path.resolve()
-
-    if not install_root.is_dir():
-        raise RuntimeError(f"Install root does not exist: {install_root}")
-    if not full_zip_path.is_file():
-        raise RuntimeError(f"Full update file does not exist: {full_zip_path}")
-
-    work_dir = install_root / f".app_full_update_{uuid4().hex}"
-    extract_dir = work_dir / "extract"
-    backup_dir = work_dir / "backup"
-    extract_dir.mkdir(parents=True, exist_ok=True)
-    backup_dir.mkdir(parents=True, exist_ok=True)
-
-    created_paths: list[Path] = []
-    backup_paths: list[str] = []
-
-    try:
-        safe_extract(full_zip_path, extract_dir)
-        bundle_root = find_full_bundle_root(extract_dir)
-        source_rel_paths = collect_full_bundle_files(bundle_root)
-        copied_rel_paths = [rel for rel in source_rel_paths if not is_protected_file(rel)]
-        source_set = set(copied_rel_paths)
-        delete_rel_paths = [
-            rel
-            for rel in collect_managed_install_files(install_root)
-            if rel not in source_set and not is_protected_file(rel)
-        ]
-
-        def backup_if_exists(rel: str) -> None:
-            target = install_root / rel
-            if target.exists() and target.is_file() and rel not in backup_paths:
-                dest = backup_dir / rel
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(target, dest)
-                backup_paths.append(rel)
-
-        for rel in copied_rel_paths:
-            source = bundle_root / rel
-            target = install_root / rel
-            if not is_safe_path(install_root, target):
-                raise RuntimeError(f"Unsafe target path in full update: {rel}")
-
-            backup_if_exists(rel)
-            if not target.exists():
-                created_paths.append(target)
-
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
-
-        for rel in delete_rel_paths:
-            target = install_root / rel
-            if not is_safe_path(install_root, target):
-                raise RuntimeError(f"Unsafe delete target in full update: {rel}")
-
-            if target.exists() and target.is_file():
-                backup_if_exists(rel)
-                target.unlink()
-
-        for rel in copied_rel_paths:
-            source = bundle_root / rel
-            target = install_root / rel
-            if not target.exists() or sha256_file(source) != sha256_file(target):
-                raise RuntimeError(f"Hash mismatch after full update apply: {rel}")
-
-    except Exception:
-        for path in created_paths:
-            if path.exists() and path.is_file():
-                path.unlink()
-
-        for rel in backup_paths:
-            backup_file = backup_dir / rel
-            target = install_root / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(backup_file, target)
-        raise
-    finally:
-        shutil.rmtree(work_dir, ignore_errors=True)
-
-
 def fetch_update_feed(feed_url: str) -> dict:
     if requests is None:
         raise RuntimeError("requests is required to fetch update metadata.")
@@ -659,11 +465,6 @@ class UpdaterApp(ctk.CTk if ctk else object):
                 f"Details: {exc}"
             )
             self.after(0, self.finish_failure)
-
-    def finish_success(self) -> None:
-        self.progress.stop()
-        self.progress.pack_forget()
-        self.action_button.configure(text="Restart app", state="normal")
 
     def finish_failure(self) -> None:
         self.progress.stop()
